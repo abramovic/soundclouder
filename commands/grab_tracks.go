@@ -261,6 +261,10 @@ T:
 			aeroClient.PutObject(nil, key, track)
 			keyTS, _ := as.NewKey(ASNamespace, "track_crawl", fmt.Sprintf("%d-%d", now, track_id))
 			aeroClient.PutObject(nil, keyTS, track)
+			if track.User.Id > 0 {
+				keyUser, _ := as.NewKey(ASNamespace, "user", track.User.Id)
+				aeroClient.PutObject(nil, keyUser, track.User)
+			}
 		}
 	}
 	wg.Done()
