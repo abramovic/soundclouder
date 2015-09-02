@@ -1,0 +1,13 @@
+This requires Aerospike. For docker users please run
+
+docker run -tid --name aerospike -p 3000:3000 -p 3001:3001 -p 3002:3002 -p 3003:3003 aerospike/aerospike-server
+
+To run against all of SoundCloud...
+./grab_tracks config.json
+
+I have  made the assumption that you might run 10 processes...
+
+./grab_tracks config.json 0 -- only looks at tracks that end with "0"
+./grab_tracks config.json 1 -- only looks at tracks that end with "1"
+
+By storing information in Aerospike we will ignore any tracks that don't exist to avoid over-hitting the SoundCloud API
