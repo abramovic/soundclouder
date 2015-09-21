@@ -1,6 +1,0 @@
-{
-    "host": "docker",
-    "namespace": "test",
-    "client_id": "",
-    "max_workers": 200
-}

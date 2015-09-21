@@ -1,0 +1,5 @@
+{
+    "host": "localhost",
+    "client_id": "fill-in-here",
+    "max_workers": 200
+}
