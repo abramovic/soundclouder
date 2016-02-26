@@ -18,10 +18,7 @@ import (
 )
 
 var (
-	MAX_WORKERS int = 200
-)
-
-var (
+	max_workers  int = 200
 	playlist_ids chan int
 	track_ids    chan int
 	maxPlaylist  = flag.Int("playlist", 40000000, "max playlist id") // We can't automatically grab the max playlist id
@@ -69,15 +66,11 @@ func main() {
 	}
 
 	if config.MaxWorkers > 0 {
-		MAX_WORKERS = config.MaxWorkers
+		max_workers = config.MaxWorkers
 	}
 
-	c := &crawler.Crawler{
-		ClientId:    config.ClientId,
-		HttpClient:  crawler.CreateHTTPClient(),
-		RedisClient: crawler.CreateRedisClient(config.Host, 6379),
-	}
-	defer c.RedisClient.Close()
+	c := crawler.New(config)
+	defer c.Close()
 
 	crawler := Crawler{c}
 
@@ -100,10 +93,10 @@ func main() {
 		close(playlist_ids)
 	}()
 
-	track_ids = make(chan int, MAX_WORKERS)
+	track_ids = make(chan int, max_workers)
 	var trackMonitor sync.WaitGroup
-	trackMonitor.Add(MAX_WORKERS)
-	for i := 0; i < MAX_WORKERS; i++ {
+	trackMonitor.Add(max_workers)
+	for i := 0; i < max_workers; i++ {
 		go crawler.ProcessTracks(&trackMonitor)
 	}
 
@@ -155,10 +148,10 @@ func main() {
 	// Manually run garbage collection to free up any memory that is no longer used
 	runtime.GC()
 
-	playlist_ids = make(chan int, MAX_WORKERS)
+	playlist_ids = make(chan int, max_workers)
 	var playlistMonitor sync.WaitGroup
-	playlistMonitor.Add(MAX_WORKERS)
-	for i := 0; i < MAX_WORKERS; i++ {
+	playlistMonitor.Add(max_workers)
+	for i := 0; i < max_workers; i++ {
 		go crawler.ProcessPlaylists(&playlistMonitor)
 	}
 	if *useEmpty == true && canCrawl {

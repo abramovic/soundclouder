@@ -3,7 +3,9 @@ package crawler
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Abramovic/soundclouder/config"
 	"github.com/Abramovic/soundclouder/models"
+	"github.com/carlescere/goback"
 	"github.com/garyburd/redigo/redis"
 	"io/ioutil"
 	"net/http"
@@ -15,6 +17,30 @@ type Crawler struct {
 	ClientId    string
 	RedisClient *redis.Pool
 	HttpClient  *http.Client
+	BackOff     *goback.SimpleBackoff
+}
+
+var domain string = "http://api.soundcloud.com"
+
+func New(config config.Configuration) *Crawler {
+	return &Crawler{
+		ClientId:    config.ClientId,
+		HttpClient:  CreateHTTPClient(),
+		RedisClient: CreateRedisClient(config.Host, 6379),
+		BackOff:     CreateGoback(),
+	}
+}
+
+func (c *Crawler) Close() error {
+	return c.RedisClient.Close()
+}
+
+func CreateGoback() *goback.SimpleBackoff {
+	return &goback.SimpleBackoff{
+		Min:    5 * time.Second,
+		Max:    2 * time.Hour,
+		Factor: 2,
+	}
 }
 
 func CreateRedisClient(host string, port int) *redis.Pool {
@@ -55,12 +81,21 @@ func RedisKey(prefix string, id int) (string, string) {
 	return fmt.Sprintf("%s:%d", prefix, i), fmt.Sprintf("%d", id)
 }
 
+func (c *Crawler) Wait() {
+	if c.BackOff != nil {
+		goback.Wait(c.BackOff)
+		return
+	}
+	time.Sleep(5 * time.Second)
+}
+
 // The /tracks endpoint without a track_id searches for track using the query paramaters.
 // Normally you would want to use "q=search-term" but we want to look at all of the songs
 // By including the created_at query param we will get back the most recent tracks on SoundCloud
 // Limit the results to just one track since we just need the highest track id
 func (c *Crawler) GetHighTrackId() (int, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://api.soundcloud.com/tracks?client_id=%s&limit=1&created_at[from]=", c.ClientId), nil)
+	url := fmt.Sprintf("%s/tracks?client_id=%s&limit=1&created_at[from]=", domain, c.ClientId)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -86,27 +121,26 @@ func (c *Crawler) GetHighTrackId() (int, error) {
 
 // Getting a SoundCloud playlist using an HTTP Client instead of the SoundCloud Go library.
 func (c *Crawler) GetPlaylist(id int) (*models.Playlist, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://api.soundcloud.com/playlists/%d?client_id=%s", id, c.ClientId), nil)
+	var err error
+	var p models.Playlist
+	url := fmt.Sprintf("%s/playlists/%d?client_id=%s", domain, id, c.ClientId)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
 		// We most likely hit some issue with SoundCloud... time to back off
-		time.Sleep(5 * time.Second)
+		c.Wait()
 		return nil, err
 	}
-
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-
-	var p models.Playlist
 	err = json.Unmarshal(body, &p)
 	if err != nil {
-		fmt.Println("Parse Playlist", err)
 		return nil, err
 	}
 	return &p, nil
@@ -114,30 +148,53 @@ func (c *Crawler) GetPlaylist(id int) (*models.Playlist, error) {
 
 // Get a track using the standard http client
 func (c *Crawler) GetTrack(id int) (*models.Track, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://api.soundcloud.com/tracks/%d?client_id=%s", id, c.ClientId), nil)
+	var t models.Track
+	url := fmt.Sprintf("%s/tracks/%d?client_id=%s", domain, id, c.ClientId)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
 		// We most likely hit some issue with SoundCloud... time to back off
-		time.Sleep(5 * time.Second)
+		c.Wait()
 		return nil, err
 	}
-
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-
-	var t models.Track
 	err = json.Unmarshal(body, &t)
 	if err != nil {
-		fmt.Println("Parse Track", err)
 		return nil, err
 	}
 	return &t, nil
+}
+
+func (c *Crawler) getTrackFavoriters(id, offset int) []models.Favoriter {
+	var favoriters []models.Favoriter
+	url := fmt.Sprintf("%s/tracks/%d/favoriters?client_id=%s&limit=200&offset=%d", domain, id, c.ClientId, offset)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return favoriters
+	}
+	resp, err := c.HttpClient.Do(req)
+	if err != nil {
+		// We most likely hit some issue with SoundCloud... time to back off
+		c.Wait()
+		return favoriters
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return favoriters
+	}
+	err = json.Unmarshal(body, &favoriters)
+	if err != nil {
+		return favoriters
+	}
+	return favoriters
 }
 
 // Get all of the favoriters from a Track. We can get up to 200 results at a time and use an offset to grab all of the favoriters
@@ -145,26 +202,7 @@ func (c *Crawler) GetTrackFavoriters(id int) []models.Favoriter {
 	var offset int = 0
 	var favoriters []models.Favoriter
 	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://api.soundcloud.com/tracks/%d/favoriters?client_id=%s&limit=200&offset=%d", id, c.ClientId, offset), nil)
-		if err != nil {
-			break
-		}
-		resp, err := c.HttpClient.Do(req)
-		if err != nil {
-			// We most likely hit some issue with SoundCloud... time to back off
-			time.Sleep(5 * time.Second)
-			break
-		}
-		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			break
-		}
-		var results []models.Favoriter
-		err = json.Unmarshal(body, &results)
-		if err != nil {
-			break
-		}
+		results := c.getTrackFavoriters(id, offset)
 		for _, result := range results {
 			favoriters = append(favoriters, result)
 		}
@@ -178,30 +216,36 @@ func (c *Crawler) GetTrackFavoriters(id int) []models.Favoriter {
 	return favoriters
 }
 
+func (c *Crawler) getTrackComments(id, offset int) []models.Comment {
+	var comments []models.Comment
+	url := fmt.Sprintf("%s/tracks/%d/comments?client_id=%s&limit=200&offset=%d", domain, id, c.ClientId, offset)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return comments
+	}
+	resp, err := c.HttpClient.Do(req)
+	if err != nil {
+		// We most likely hit some issue with SoundCloud... time to back off
+		c.Wait()
+		return comments
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return comments
+	}
+	err = json.Unmarshal(body, &comments)
+	if err != nil {
+		return comments
+	}
+	return comments
+}
+
 func (c *Crawler) GetTrackComments(id int) []models.Comment {
 	var offset int = 0
 	var comments []models.Comment
 	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://api.soundcloud.com/tracks/%d/comments?client_id=%s&limit=200&offset=%d", id, c.ClientId, offset), nil)
-		if err != nil {
-			break
-		}
-		resp, err := c.HttpClient.Do(req)
-		if err != nil {
-			// We most likely hit some issue with SoundCloud... time to back off
-			time.Sleep(5 * time.Second)
-			break
-		}
-		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			break
-		}
-		var results []models.Comment
-		err = json.Unmarshal(body, &results)
-		if err != nil {
-			break
-		}
+		results := c.getTrackComments(id, offset)
 		for _, result := range results {
 			comments = append(comments, result)
 		}
